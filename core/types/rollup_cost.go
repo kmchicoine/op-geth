@@ -80,7 +80,7 @@ var (
 	oneMillion     = big.NewInt(1_000_000)
 	ecotoneDivisor = big.NewInt(1_000_000 * 16)
 	fjordDivisor   = big.NewInt(1_000_000_000_000)
-	sixteen        = big.NewInt(16)
+	forty          = big.NewInt(40)
 
 	L1CostIntercept  = big.NewInt(-42_585_600)
 	L1CostFastlzCoef = big.NewInt(836_500)
@@ -301,10 +301,10 @@ func newL1CostFuncEcotone(l1BaseFee, l1BlobBaseFee, l1BaseFeeScalar, l1BlobBaseF
 		//
 		// Function is actually computed as follows for better precision under integer arithmetic:
 		//
-		//   calldataGas*(l1BaseFee*16*l1BaseFeeScalar + l1BlobBaseFee*l1BlobBaseFeeScalar)/16e6
+		//   calldataGas*(l1BaseFee*40*l1BaseFeeScalar + l1BlobBaseFee*l1BlobBaseFeeScalar)/16e6
 
 		calldataCostPerByte := new(big.Int).Set(l1BaseFee)
-		calldataCostPerByte = calldataCostPerByte.Mul(calldataCostPerByte, sixteen)
+		calldataCostPerByte = calldataCostPerByte.Mul(calldataCostPerByte, forty)
 		calldataCostPerByte = calldataCostPerByte.Mul(calldataCostPerByte, l1BaseFeeScalar)
 
 		blobCostPerByte := new(big.Int).Set(l1BlobBaseFee)
@@ -527,12 +527,12 @@ func l1CostHelper(gasWithOverhead, l1BaseFee, scalar *big.Int) *big.Int {
 func NewL1CostFuncFjord(l1BaseFee, l1BlobBaseFee, baseFeeScalar, blobFeeScalar *big.Int) l1CostFunc {
 	return func(costData RollupCostData) (fee, calldataGasUsed *big.Int) {
 		// Fjord L1 cost function:
-		// l1FeeScaled = baseFeeScalar*l1BaseFee*16 + blobFeeScalar*l1BlobBaseFee
+		// l1FeeScaled = baseFeeScalar*l1BaseFee*40 + blobFeeScalar*l1BlobBaseFee
 		// estimatedSize = max(minTransactionSize, intercept + fastlzCoef*fastlzSize)
 		// l1Cost = estimatedSize * l1FeeScaled / 1e12
 
 		scaledL1BaseFee := new(big.Int).Mul(baseFeeScalar, l1BaseFee)
-		calldataCostPerByte := new(big.Int).Mul(scaledL1BaseFee, sixteen)
+		calldataCostPerByte := new(big.Int).Mul(scaledL1BaseFee, forty)
 		blobCostPerByte := new(big.Int).Mul(blobFeeScalar, l1BlobBaseFee)
 		l1FeeScaled := new(big.Int).Add(calldataCostPerByte, blobCostPerByte)
 		estimatedSize := costData.estimatedDASizeScaled()

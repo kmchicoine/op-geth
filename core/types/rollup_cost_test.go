@@ -29,9 +29,9 @@ var (
 	// which is defined in transaction_test.go
 	bedrockFee  = big.NewInt(11326000000000)
 	regolithFee = big.NewInt(3710000000000)
-	ecotoneFee  = big.NewInt(960900) // (480/16)*(2*16*1000 + 3*10) == 960900
+	ecotoneFee  = big.NewInt(2400900) // (480/16)*(2*40*1000 + 3*10) == 2400900
 	// the emptyTx is out of bounds for the linear regression so it uses the minimum size
-	fjordFee          = big.NewInt(3203000)                 // 100_000_000 * (2 * 1000 * 1e6 * 16 + 3 * 10 * 1e6) / 1e12
+	fjordFee          = big.NewInt(8003000)                 // 100_000_000 * (2 * 1000 * 1e6 * 40 + 3 * 10 * 1e6) / 1e12
 	ithmusOperatorFee = uint256.NewInt(1256417826611659930) // 1618 * 1439103868 / 1e6 + 1256417826609331460
 
 	bedrockGas      = big.NewInt(1618)
@@ -113,7 +113,7 @@ func TestFjordL1CostSolidityParity(t *testing.T) {
 	})
 
 	require.Equal(t, big.NewInt(2463), g0)
-	require.Equal(t, big.NewInt(105484), c0)
+	require.Equal(t, big.NewInt(253316), c0)
 }
 
 func TestExtractBedrockGasParams(t *testing.T) {

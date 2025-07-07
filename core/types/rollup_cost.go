@@ -332,7 +332,7 @@ func newL1CostFuncEcotone(l1BaseFee, l1BlobBaseFee, l1BaseFeeScalar, l1BlobBaseF
 		//
 		// Function is actually computed as follows for better precision under integer arithmetic:
 		//
-		//   calldataGas*(l1BaseFee*40*l1BaseFeeScalar + l1BlobBaseFee*l1BlobBaseFeeScalar)/16e6
+		//   calldataGas*(l1BaseFee*16*l1BaseFeeScalar + l1BlobBaseFee*l1BlobBaseFeeScalar)/16e6
 
 		calldataCostPerByte := new(big.Int).Set(l1BaseFee)
 		calldataCostPerByte = calldataCostPerByte.Mul(calldataCostPerByte, sixteen)
@@ -571,7 +571,7 @@ func l1CostHelper(gasWithOverhead, l1BaseFee, scalar *big.Int) *big.Int {
 func NewL1CostFuncFjord(l1BaseFee, l1BlobBaseFee, baseFeeScalar, blobFeeScalar *big.Int) l1CostFunc {
 	return func(costData RollupCostData) (fee, calldataGasUsed *big.Int) {
 		// Fjord L1 cost function:
-		// l1FeeScaled = baseFeeScalar*l1BaseFee*40 + blobFeeScalar*l1BlobBaseFee
+		// l1FeeScaled = baseFeeScalar*l1BaseFee*16 + blobFeeScalar*l1BlobBaseFee
 		// estimatedSize = max(minTransactionSize, intercept + fastlzCoef*fastlzSize)
 		// l1Cost = estimatedSize * l1FeeScaled / 1e12
 

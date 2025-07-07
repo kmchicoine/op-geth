@@ -81,6 +81,7 @@ var (
 	ecotoneDivisor = big.NewInt(1_000_000 * 16)
 	fjordDivisor   = big.NewInt(1_000_000_000_000)
 	sixteen        = big.NewInt(16)
+	forty          = big.NewInt(40)
 
 	L1CostIntercept  = big.NewInt(-42_585_600)
 	L1CostFastlzCoef = big.NewInt(836_500)
@@ -149,6 +150,14 @@ func NewL1CostFunc(config *params.ChainConfig, statedb StateGetter) L1CostFunc {
 	var cachedFunc l1CostFunc
 	selectFunc := func(blockTime uint64) l1CostFunc {
 		if !config.IsOptimismEcotone(blockTime) {
+			if config.IsJovian(blockTime) {
+				// Inline state extraction for Jovian
+				l1BaseFee := statedb.GetState(L1BlockAddr, L1BaseFeeSlot).Big()
+				overhead := statedb.GetState(L1BlockAddr, OverheadSlot).Big()
+				scalar := statedb.GetState(L1BlockAddr, ScalarSlot).Big()
+				isRegolith := config.IsRegolith(blockTime)
+				return newL1CostFuncJovian(l1BaseFee, overhead, scalar, isRegolith)
+			}
 			return newL1CostFuncBedrock(config, statedb, blockTime)
 		}
 
@@ -286,6 +295,28 @@ func newL1CostFuncBedrockHelper(l1BaseFee, overhead, scalar *big.Int, isRegolith
 	}
 }
 
+// newL1CostFuncJovian returns an L1 cost function suitable for the Jovian upgrade with
+// already extracted parameters. It uses 40 as the calldata multiplier for non-zero bytes.
+func newL1CostFuncJovian(l1BaseFee, overhead, scalar *big.Int, isRegolith bool) l1CostFunc {
+	return func(rollupCostData RollupCostData) (fee, gasUsed *big.Int) {
+		if rollupCostData == (RollupCostData{}) {
+			return nil, nil // Do not charge if there is no rollup cost-data (e.g. RPC call or deposit)
+		}
+		gas := rollupCostData.Zeroes * params.TxDataZeroGas
+		if isRegolith {
+			// Use Jovian calldata multiplier instead of 16
+			gas += rollupCostData.Ones * params.TxDataNonZeroGasJovian
+		} else {
+			// Use Jovian calldata multiplier instead of 16
+			gas += (rollupCostData.Ones + 68) * params.TxDataNonZeroGasJovian
+		}
+		gasWithOverhead := new(big.Int).SetUint64(gas)
+		gasWithOverhead.Add(gasWithOverhead, overhead)
+		l1Cost := l1CostHelper(gasWithOverhead, l1BaseFee, scalar)
+		return l1Cost, gasWithOverhead
+	}
+}
+
 // newL1CostFuncEcotone returns an l1 cost function suitable for the Ecotone upgrade except for the
 // very first block of the upgrade.
 func newL1CostFuncEcotone(l1BaseFee, l1BlobBaseFee, l1BaseFeeScalar, l1BlobBaseFeeScalar *big.Int) l1CostFunc {
@@ -301,7 +332,7 @@ func newL1CostFuncEcotone(l1BaseFee, l1BlobBaseFee, l1BaseFeeScalar, l1BlobBaseF
 		//
 		// Function is actually computed as follows for better precision under integer arithmetic:
 		//
-		//   calldataGas*(l1BaseFee*16*l1BaseFeeScalar + l1BlobBaseFee*l1BlobBaseFeeScalar)/16e6
+		//   calldataGas*(l1BaseFee*40*l1BaseFeeScalar + l1BlobBaseFee*l1BlobBaseFeeScalar)/16e6
 
 		calldataCostPerByte := new(big.Int).Set(l1BaseFee)
 		calldataCostPerByte = calldataCostPerByte.Mul(calldataCostPerByte, sixteen)
@@ -363,6 +394,8 @@ type gasParams struct {
 	l1BlobBaseFee       *big.Int
 	costFunc            l1CostFunc
 	feeScalar           *big.Float // pre-ecotone
+	overhead            *big.Int   // pre-ecotone (Bedrock/Jovian)
+	scalar              *big.Int   // pre-ecotone (Bedrock/Jovian)
 	l1BaseFeeScalar     *uint32    // post-ecotone
 	l1BlobBaseFeeScalar *uint32    // post-ecotone
 	operatorFeeScalar   *uint32    // post-Isthmus
@@ -420,6 +453,15 @@ func extractL1GasParams(config *params.ChainConfig, time uint64, data []byte) (g
 		}
 
 		return p, nil
+	} else if config.IsJovian(time) {
+		// Use Jovian cost function which uses 40 as calldata multiplier instead of 16
+		p, err := extractL1GasParamsPreEcotone(config, time, data)
+		if err != nil {
+			return gasParams{}, err
+		}
+		// Override the cost function to use Jovian multiplier instead of Bedrock
+		p.costFunc = newL1CostFuncJovian(p.l1BaseFee, p.overhead, p.scalar, config.IsRegolith(time))
+		return p, nil
 	}
 	return extractL1GasParamsPreEcotone(config, time, data)
 }
@@ -439,6 +481,8 @@ func extractL1GasParamsPreEcotone(config *params.ChainConfig, time uint64, data 
 		l1BaseFee: l1BaseFee,
 		costFunc:  costFunc,
 		feeScalar: feeScalar,
+		overhead:  overhead,
+		scalar:    scalar,
 	}, nil
 }
 
@@ -527,7 +571,7 @@ func l1CostHelper(gasWithOverhead, l1BaseFee, scalar *big.Int) *big.Int {
 func NewL1CostFuncFjord(l1BaseFee, l1BlobBaseFee, baseFeeScalar, blobFeeScalar *big.Int) l1CostFunc {
 	return func(costData RollupCostData) (fee, calldataGasUsed *big.Int) {
 		// Fjord L1 cost function:
-		// l1FeeScaled = baseFeeScalar*l1BaseFee*16 + blobFeeScalar*l1BlobBaseFee
+		// l1FeeScaled = baseFeeScalar*l1BaseFee*40 + blobFeeScalar*l1BlobBaseFee
 		// estimatedSize = max(minTransactionSize, intercept + fastlzCoef*fastlzSize)
 		// l1Cost = estimatedSize * l1FeeScaled / 1e12
 

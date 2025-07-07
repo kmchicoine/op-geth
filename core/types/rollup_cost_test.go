@@ -34,10 +34,25 @@ var (
 	fjordFee          = big.NewInt(3203000)                 // 100_000_000 * (2 * 1000 * 1e6 * 16 + 3 * 10 * 1e6) / 1e12
 	ithmusOperatorFee = uint256.NewInt(1256417826611659930) // 1618 * 1439103868 / 1e6 + 1256417826609331460
 
+	// Jovian fees calculated based on using 40 instead of 16 for non-zero bytes
+	// EmptyTx actual RollupCostData: Zeroes=0, Ones=30
+	// For regolith: ones * 40 + zeroes * 4 = 30 * 40 + 0 * 4 = 1200
+	// For pre-regolith: (ones + 68) * 40 + zeroes * 4 = (30 + 68) * 40 + 0 * 4 = 3920
+	// Gas with overhead: gas + 50, then fee = gasWithOverhead * baseFee * scalar / 1e6
+	jovianRegolithFee    = big.NewInt(8750000000000)  // (1200 + 50) * 1000 * 1e6 * 7 * 1e6 / 1e6 = 8750000000000
+	jovianPreRegolithFee = big.NewInt(27790000000000) // (3920 + 50) * 1000 * 1e6 * 7 * 1e6 / 1e6 = 27790000000000
+
 	bedrockGas      = big.NewInt(1618)
 	regolithGas     = big.NewInt(530) // 530  = 1618 - (16*68)
 	ecotoneGas      = big.NewInt(480)
 	minimumFjordGas = big.NewInt(1600) // fastlz size of minimum txn, 100_000_000 * 16 / 1e6
+
+	// Jovian gas usage: ones * 40 + zeroes * 4 instead of ones * 16 + zeroes * 4
+	// EmptyTx: Zeroes=0, Ones=30
+	// For regolith: 30 * 40 + 0 * 4 = 1200
+	// For pre-regolith: (30 + 68) * 40 + 0 * 4 = 98 * 40 = 3920
+	jovianRegolithGas    = big.NewInt(1250) // 1200 + 50 (overhead)
+	jovianPreRegolithGas = big.NewInt(3970) // 3920 + 50 (overhead)
 )
 
 func TestBedrockL1CostFunc(t *testing.T) {
@@ -61,6 +76,201 @@ func TestEcotoneL1CostFunc(t *testing.T) {
 
 	require.Equal(t, ecotoneGas, g0)
 	require.Equal(t, ecotoneFee, c0)
+}
+
+func TestJovianL1CostFunc(t *testing.T) {
+	costFunc0 := newL1CostFuncJovian(baseFee, overhead, scalar, false /*isRegolith*/)
+	costFunc1 := newL1CostFuncJovian(baseFee, overhead, scalar, true)
+
+	c0, g0 := costFunc0(emptyTx.RollupCostData()) // pre-Regolith
+	c1, g1 := costFunc1(emptyTx.RollupCostData()) // Regolith
+
+	require.Equal(t, jovianPreRegolithFee, c0)
+	require.Equal(t, jovianPreRegolithGas, g0) // gas-used
+
+	require.Equal(t, jovianRegolithFee, c1)
+	require.Equal(t, jovianRegolithGas, g1)
+}
+
+func TestJovianL1CostFuncEmpty(t *testing.T) {
+	costFunc := newL1CostFuncJovian(baseFee, overhead, scalar, true)
+
+	// Empty rollup cost data should return nil
+	c, g := costFunc(RollupCostData{})
+	require.Nil(t, c)
+	require.Nil(t, g)
+}
+
+func TestJovianL1CostFuncCustomData(t *testing.T) {
+	testCases := []struct {
+		name       string
+		costData   RollupCostData
+		isRegolith bool
+	}{
+		{
+			name:       "all zero bytes pre-regolith",
+			costData:   RollupCostData{Zeroes: 100, Ones: 0, FastLzSize: 50},
+			isRegolith: false,
+		},
+		{
+			name:       "all zero bytes regolith",
+			costData:   RollupCostData{Zeroes: 100, Ones: 0, FastLzSize: 50},
+			isRegolith: true,
+		},
+		{
+			name:       "mixed bytes pre-regolith",
+			costData:   RollupCostData{Zeroes: 50, Ones: 50, FastLzSize: 75},
+			isRegolith: false,
+		},
+		{
+			name:       "mixed bytes regolith",
+			costData:   RollupCostData{Zeroes: 50, Ones: 50, FastLzSize: 75},
+			isRegolith: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			costFunc := newL1CostFuncJovian(baseFee, overhead, scalar, tc.isRegolith)
+			c, g := costFunc(tc.costData)
+
+			require.NotNil(t, c)
+			require.NotNil(t, g)
+			require.Greater(t, c.Uint64(), uint64(0))
+			require.Greater(t, g.Uint64(), uint64(0))
+
+			// Verify the gas calculation uses the correct multiplier (40 for Jovian)
+			expectedGas := tc.costData.Zeroes * params.TxDataZeroGas
+			if tc.isRegolith {
+				expectedGas += tc.costData.Ones * params.TxDataNonZeroGasJovian
+			} else {
+				expectedGas += (tc.costData.Ones + 68) * params.TxDataNonZeroGasJovian
+			}
+
+			expectedGasWithOverhead := new(big.Int).SetUint64(expectedGas)
+			expectedGasWithOverhead.Add(expectedGasWithOverhead, overhead)
+			require.Equal(t, expectedGasWithOverhead, g)
+		})
+	}
+}
+
+func TestJovianL1CostFuncForkBoundary(t *testing.T) {
+	regolithTime := uint64(5)
+	jovianTime := uint64(10)
+	config := &params.ChainConfig{
+		Optimism:     params.OptimismTestConfig.Optimism,
+		RegolithTime: &regolithTime,
+		JovianTime:   &jovianTime,
+	}
+
+	data := getBedrockL1Attributes(baseFee, overhead, scalar)
+
+	// Test before Jovian fork (but after Regolith) - should use Bedrock with Regolith
+	gasparams, err := extractL1GasParams(config, jovianTime-1, data)
+	costFuncPreJovian := gasparams.costFunc
+	require.NoError(t, err)
+
+	// Test at Jovian fork - should use Jovian
+	gasparams, err = extractL1GasParams(config, jovianTime, data)
+	costFuncAtJovian := gasparams.costFunc
+	require.NoError(t, err)
+
+	// Test after Jovian fork - should use Jovian
+	gasparams, err = extractL1GasParams(config, jovianTime+1, data)
+	costFuncPostJovian := gasparams.costFunc
+	require.NoError(t, err)
+
+	// Verify fork boundary behavior
+	c, _ := costFuncPreJovian(emptyTx.RollupCostData())
+	require.Equal(t, regolithFee, c) // Should use Bedrock Regolith before Jovian
+
+	c, _ = costFuncAtJovian(emptyTx.RollupCostData())
+	require.Equal(t, jovianRegolithFee, c) // Should use Jovian at fork
+
+	c, _ = costFuncPostJovian(emptyTx.RollupCostData())
+	require.Equal(t, jovianRegolithFee, c) // Should use Jovian after fork
+}
+
+func TestJovianL1CostFuncRegolithInteraction(t *testing.T) {
+	// Test multiple scenarios of Regolith and Jovian interaction
+	testCases := []struct {
+		name         string
+		regolithTime *uint64
+		jovianTime   *uint64
+		testTime     uint64
+		expectedFee  *big.Int
+		expectedGas  *big.Int
+		description  string
+	}{
+		{
+			name:         "pre-regolith-pre-jovian",
+			regolithTime: uint64Ptr(10),
+			jovianTime:   uint64Ptr(20),
+			testTime:     5,
+			expectedFee:  bedrockFee,
+			expectedGas:  bedrockGas,
+			description:  "Before both forks should use Bedrock pre-regolith",
+		},
+		{
+			name:         "post-regolith-pre-jovian",
+			regolithTime: uint64Ptr(10),
+			jovianTime:   uint64Ptr(20),
+			testTime:     15,
+			expectedFee:  regolithFee,
+			expectedGas:  regolithGas,
+			description:  "After Regolith but before Jovian should use Bedrock regolith",
+		},
+		{
+			name:         "pre-regolith-post-jovian",
+			regolithTime: uint64Ptr(30),
+			jovianTime:   uint64Ptr(20),
+			testTime:     25,
+			expectedFee:  jovianPreRegolithFee,
+			expectedGas:  jovianPreRegolithGas,
+			description:  "After Jovian but before Regolith should use Jovian pre-regolith",
+		},
+		{
+			name:         "post-regolith-post-jovian",
+			regolithTime: uint64Ptr(10),
+			jovianTime:   uint64Ptr(20),
+			testTime:     25,
+			expectedFee:  jovianRegolithFee,
+			expectedGas:  jovianRegolithGas,
+			description:  "After both forks should use Jovian regolith",
+		},
+		{
+			name:         "same-time-forks",
+			regolithTime: uint64Ptr(20),
+			jovianTime:   uint64Ptr(20),
+			testTime:     20,
+			expectedFee:  jovianRegolithFee,
+			expectedGas:  jovianRegolithGas,
+			description:  "Both forks at same time should use Jovian regolith",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			config := &params.ChainConfig{
+				Optimism:     params.OptimismTestConfig.Optimism,
+				RegolithTime: tc.regolithTime,
+				JovianTime:   tc.jovianTime,
+			}
+
+			data := getBedrockL1Attributes(baseFee, overhead, scalar)
+			gasparams, err := extractL1GasParams(config, tc.testTime, data)
+			require.NoError(t, err)
+
+			c, g := gasparams.costFunc(emptyTx.RollupCostData())
+			require.Equal(t, tc.expectedFee, c, tc.description+" - fee mismatch")
+			require.Equal(t, tc.expectedGas, g, tc.description+" - gas mismatch")
+		})
+	}
+}
+
+// Helper function for cleaner test code
+func uint64Ptr(v uint64) *uint64 {
+	return &v
 }
 
 func TestFjordL1CostFuncMinimumBounds(t *testing.T) {
@@ -244,8 +454,66 @@ func TestExtractIsthmusGasParams(t *testing.T) {
 	require.Equal(t, operatorFeeConstant.Uint64(), *gasparams.operatorFeeConstant)
 }
 
-// make sure the first block of the ecotone upgrade is properly detected, and invokes the bedrock
-// cost function appropriately
+func TestExtractJovianGasParams(t *testing.T) {
+	regolithTime := uint64(5)
+	jovianTime := uint64(10)
+	config := &params.ChainConfig{
+		Optimism:     params.OptimismTestConfig.Optimism,
+		RegolithTime: &regolithTime,
+		JovianTime:   &jovianTime,
+	}
+
+	data := getBedrockL1Attributes(baseFee, overhead, scalar)
+
+	// Test extracting Jovian parameters with Regolith enabled
+	gasparams, err := extractL1GasParams(config, jovianTime, data)
+	require.NoError(t, err)
+	require.NotNil(t, gasparams.costFunc)
+	require.NotNil(t, gasparams.l1BaseFee)
+	require.NotNil(t, gasparams.overhead)
+	require.NotNil(t, gasparams.scalar)
+	require.NotNil(t, gasparams.feeScalar)
+	require.Equal(t, baseFee, gasparams.l1BaseFee)
+	require.Equal(t, overhead, gasparams.overhead)
+	require.Equal(t, scalar, gasparams.scalar)
+
+	// cost function should use Jovian logic with Regolith
+	fee, gas := gasparams.costFunc(emptyTx.RollupCostData())
+	require.NotNil(t, fee)
+	require.NotNil(t, gas)
+	require.Equal(t, jovianRegolithFee, fee)
+	require.Equal(t, jovianRegolithGas, gas)
+
+	// Test extracting Jovian parameters with Regolith disabled
+	gasparams, err = extractL1GasParams(config, jovianTime-1, data)
+	require.NoError(t, err)
+
+	// cost function should use Bedrock logic with Regolith (before Jovian)
+	fee, gas = gasparams.costFunc(emptyTx.RollupCostData())
+	require.NotNil(t, fee)
+	require.NotNil(t, gas)
+	require.Equal(t, regolithFee, fee)
+	require.Equal(t, regolithGas, gas)
+
+	// Test extracting Jovian parameters with Regolith disabled but Jovian enabled
+	regolithTimeAfterJovian := jovianTime + 10
+	configPreRegolith := &params.ChainConfig{
+		Optimism:     params.OptimismTestConfig.Optimism,
+		RegolithTime: &regolithTimeAfterJovian, // Set regolith after jovian
+		JovianTime:   &jovianTime,
+	}
+
+	gasparams, err = extractL1GasParams(configPreRegolith, jovianTime, data)
+	require.NoError(t, err)
+
+	// cost function should use Jovian logic without Regolith
+	fee, gas = gasparams.costFunc(emptyTx.RollupCostData())
+	require.NotNil(t, fee)
+	require.NotNil(t, gas)
+	require.Equal(t, jovianPreRegolithFee, fee)
+	require.Equal(t, jovianPreRegolithGas, gas)
+}
+
 func TestFirstBlockEcotoneGasParams(t *testing.T) {
 	zeroTime := uint64(0)
 	// create a config where ecotone upgrade is active
@@ -392,7 +660,27 @@ func TestNewL1CostFunc(t *testing.T) {
 	require.NotNil(t, fee)
 	require.Equal(t, regolithFee, fee)
 
+	// emptyTx fee w/ jovian config (pre-regolith) should be the jovian pre-regolith fee
+	config.RegolithTime = &timeInFuture
+	config.JovianTime = &time
+	costFunc = NewL1CostFunc(config, statedb)
+	require.NotNil(t, costFunc)
+	fee = costFunc(emptyTx.RollupCostData(), time)
+	require.NotNil(t, fee)
+	require.Equal(t, jovianPreRegolithFee, fee)
+
+	// emptyTx fee w/ jovian config (regolith) should be the jovian regolith fee
+	config.RegolithTime = &time
+	config.JovianTime = &time
+	costFunc = NewL1CostFunc(config, statedb)
+	require.NotNil(t, costFunc)
+	fee = costFunc(emptyTx.RollupCostData(), time)
+	require.NotNil(t, fee)
+	require.Equal(t, jovianRegolithFee, fee)
+
 	// emptyTx fee w/ ecotone config should be the ecotone fee
+	config.RegolithTime = &time // Reset regolith to expected state
+	config.JovianTime = nil     // Clear jovian for ecotone test
 	config.EcotoneTime = &time
 	costFunc = NewL1CostFunc(config, statedb)
 	fee = costFunc(emptyTx.RollupCostData(), time)
